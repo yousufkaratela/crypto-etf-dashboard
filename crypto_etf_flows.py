@@ -1,53 +1,145 @@
+# crypto_etf_flows.py
 import re
-import requests
-import pandas as pd
-import altair as alt
-import streamlit as st
 from io import StringIO
+from typing import List
 
+import altair as alt
+import pandas as pd
+import requests
+import streamlit as st
+
+# -------------------------------
+# Page setup
+# -------------------------------
 st.set_page_config(page_title="Crypto ETF Flows Dashboard", page_icon="📊", layout="wide")
 st.title("📊 Crypto ETF Flows Dashboard (BlackRock, Grayscale, Fidelity, …)")
-st.caption("Live ETF flows pulled from Farside (parsed from text, no HTML table needed).")
+st.caption("Live flows parsed from Farside via Jina reader (works around 403).")
+
+JINA_URLS: List[str] = [
+    # Try several variants to survive subtle redirects/caching differences
+    "https://r.jina.ai/http://farside.co.uk/bitcoin-etf-flows",
+    "https://r.jina.ai/https://farside.co.uk/bitcoin-etf-flows",
+    "https://r.jina.ai/http://www.farside.co.uk/bitcoin-etf-flows",
+    "https://r.jina.ai/https://www.farside.co.uk/bitcoin-etf-flows",
+    "https://r.jina.ai/http://farside.co.uk/bitcoin-etf-flows/",
+    "https://r.jina.ai/https://farside.co.uk/bitcoin-etf-flows/",
+]
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/124.0 Safari/537.36"
+}
 
 # -------------------------------
-# Fetch & parse
+# Helpers
 # -------------------------------
-@st.cache_data(ttl=1800, show_spinner="Fetching live ETF flows…")
-def fetch_flows():
-    url = "https://r.jina.ai/http://farside.co.uk/bitcoin-etf-flows"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(url, headers=headers, timeout=20)
-    r.raise_for_status()
-    text = r.text
+def _to_millions_number(x) -> float:
+    """Convert values like '$123.4m', '+12.3m', '-3.2m', '—', '' to float (USD)."""
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return 0.0
 
-    # Extract lines like: 2025-08-27 | IBIT | +$155.3m
-    pattern = re.compile(r"(\d{4}-\d{2}-\d{2}).*?([A-Z]{3,5}).*?([-+]?\$?\d[\d,.]*)m", re.I)
-    rows = []
-    for date, etf, val in pattern.findall(text):
-        # Clean value
-        val = val.replace("$", "").replace(",", "")
+    s = str(x).strip().lower()
+    if s in {"—", "-", "--", "nan", ""}:
+        return 0.0
+
+    # Remove currency/grouping signs
+    s = s.replace("$", "").replace(",", "").replace("usd", "").strip()
+
+    # Match optional sign + number + optional scale (m/b)
+    m = re.search(r"([+-]?\d+(?:\.\d+)?)(?:\s*([mb]))?", s)
+    if not m:
+        # Sometimes raw numbers with no suffix; treat as millions already or 0
         try:
-            flow = float(val) * 1_000_000
-        except:
+            return float(s)
+        except Exception:
+            return 0.0
+
+    val = float(m.group(1))
+    scale = m.group(2)
+    if scale == "b":
+        val *= 1_000_000_000
+    else:
+        # default to millions
+        val *= 1_000_000
+    return val
+
+
+def _pick_flows_table(tables: List[pd.DataFrame]) -> pd.DataFrame | None:
+    """Pick the table that has a 'Date' column (case-insensitive)."""
+    for t in tables:
+        cols = [str(c).strip() for c in t.columns]
+        if any(c.lower() == "date" for c in cols):
+            t.columns = cols
+            return t
+    return None
+
+
+@st.cache_data(ttl=30 * 60, show_spinner="Fetching live ETF flows…")  # 30 minutes
+def fetch_farside_flows() -> pd.DataFrame:
+    last_error = None
+
+    for url in JINA_URLS:
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=20)
+            r.raise_for_status()
+            html = r.text
+            # Parse *HTML tables* with pandas (uses bs4 + lxml behind the scenes)
+            tables = pd.read_html(StringIO(html))  # may raise if none
+            if not tables:
+                continue
+
+            base = _pick_flows_table(tables)
+            if base is None or base.empty:
+                continue
+
+            # Normalize 'Date'
+            base["Date"] = pd.to_datetime(base["Date"], errors="coerce")
+            base = base.dropna(subset=["Date"])
+
+            # Drop obviously non-flow columns if present
+            drop_like = {"total", "aum", "issuer", "inception", "fund", "cumulative"}
+            keep_cols = ["Date"] + [
+                c for c in base.columns
+                if c != "Date" and all(k not in c.lower() for k in drop_like)
+            ]
+            base = base[keep_cols]
+
+            # Clean all flow columns
+            for c in base.columns:
+                if c == "Date":
+                    continue
+                base[c] = base[c].apply(_to_millions_number)
+
+            # Reshape to long
+            long_df = base.melt(id_vars=["Date"], var_name="etf", value_name="flow_usd")
+            long_df = long_df.sort_values("Date").reset_index(drop=True)
+            return long_df
+        except Exception as e:
+            last_error = e
             continue
-        rows.append((pd.to_datetime(date), etf.upper(), flow))
 
-    df = pd.DataFrame(rows, columns=["date", "etf", "flow"])
-    return df.sort_values(["etf", "date"])
+    # If we get here, everything failed
+    msg = f"All sources failed. Last error: {last_error}"
+    raise RuntimeError(msg)
 
-
-def cumulative(df):
-    return df.groupby("etf", group_keys=False).apply(
-        lambda g: g.assign(cum_flow=g["flow"].cumsum())
-    )
 
 # -------------------------------
-# Load
+# Controls
+# -------------------------------
+col_a, col_b = st.columns([1, 2])
+with col_a:
+    if st.button("🔁 Force refresh (clear cache)", use_container_width=True):
+        fetch_farside_flows.clear()  # type: ignore[attr-defined]
+        st.experimental_rerun()
+
+# -------------------------------
+# Load data
 # -------------------------------
 try:
-    df = fetch_flows()
+    df = fetch_farside_flows()
 except Exception as e:
-    st.error(f"Failed to fetch flows: {e}")
+    st.error(f"Error fetching data: {e}")
     st.stop()
 
 if df.empty:
@@ -59,35 +151,82 @@ if df.empty:
 # -------------------------------
 with st.sidebar:
     st.header("Filters")
-    etfs = sorted(df["etf"].unique())
-    selected = st.multiselect("Select ETFs", etfs, default=etfs[:5])
-    rows = st.slider("Rows to show", 20, 300, 100)
+    all_etfs = sorted(df["etf"].unique())
+    default_pick = [e for e in all_etfs if e.upper() in {"IBIT", "GBTC", "FBTC"}]
+    if not default_pick:
+        default_pick = all_etfs[:5]
+    chosen = st.multiselect("ETFs", all_etfs, default=default_pick)
+    date_min = st.date_input("From date", value=pd.to_datetime(df["Date"]).min().date())
+    date_max = st.date_input("To date", value=pd.to_datetime(df["Date"]).max().date())
 
-df = df[df["etf"].isin(selected)]
+mask = (
+    df["etf"].isin(chosen) &
+    (df["Date"].dt.date >= pd.to_datetime(date_min).date()) &
+    (df["Date"].dt.date <= pd.to_datetime(date_max).date())
+)
+df_f = df.loc[mask].copy()
+
+if df_f.empty:
+    st.warning("No rows after filtering. Adjust your filters.")
+    st.stop()
 
 # -------------------------------
 # Charts
 # -------------------------------
-st.subheader("📉 Daily Flows (USD)")
-daily_chart = alt.Chart(df).mark_line(point=True).encode(
-    x="date:T", y="flow:Q", color="etf:N",
-    tooltip=["date:T", "etf:N", alt.Tooltip("flow:Q", format=",.0f")]
+st.subheader("📉 Daily Net Flows (USD)")
+chart = (
+    alt.Chart(df_f)
+    .mark_line(point=True)
+    .encode(
+        x=alt.X("Date:T", title="Date"),
+        y=alt.Y("flow_usd:Q", title="Flow (USD)", axis=alt.Axis(format="~s")),
+        color=alt.Color("etf:N", title="ETF"),
+        tooltip=[
+            alt.Tooltip("Date:T", title="Date"),
+            alt.Tooltip("etf:N", title="ETF"),
+            alt.Tooltip("flow_usd:Q", title="Flow", format="$.3s"),
+        ],
+    )
+    .interactive()
 )
-st.altair_chart(daily_chart, use_container_width=True)
+st.altair_chart(chart, use_container_width=True)
 
-st.subheader("📈 Cumulative Flows (USD)")
-cum_df = cumulative(df)
-cum_chart = alt.Chart(cum_df).mark_line(point=True).encode(
-    x="date:T", y="cum_flow:Q", color="etf:N",
-    tooltip=["date:T", "etf:N", alt.Tooltip("cum_flow:Q", format=",.0f")]
+st.subheader("📈 Cumulative Net Flows (USD)")
+cum = (
+    df_f.sort_values(["etf", "Date"])
+        .groupby("etf", as_index=False)
+        .apply(lambda g: g.assign(cum_flow=g["flow_usd"].cumsum()))
+        .reset_index(drop=True)
+)
+cum_chart = (
+    alt.Chart(cum)
+    .mark_line()
+    .encode(
+        x=alt.X("Date:T", title="Date"),
+        y=alt.Y("cum_flow:Q", title="Cumulative Flow (USD)", axis=alt.Axis(format="~s")),
+        color=alt.Color("etf:N", title="ETF"),
+        tooltip=[
+            alt.Tooltip("Date:T", title="Date"),
+            alt.Tooltip("etf:N", title="ETF"),
+            alt.Tooltip("cum_flow:Q", title="Cum Flow", format="$.3s"),
+        ],
+    )
+    .interactive()
 )
 st.altair_chart(cum_chart, use_container_width=True)
 
 # -------------------------------
-# Data table
+# Table
 # -------------------------------
-st.subheader("🧾 Data")
-st.dataframe(df.sort_values(["date", "etf"], ascending=[False, True]).head(rows))
-
-csv = df.to_csv(index=False).encode("utf-8")
-st.download_button("💾 Download CSV", csv, "etf_flows.csv", "text/csv")
+st.subheader("🧾 Raw data")
+st.dataframe(
+    df_f.sort_values(["Date", "etf"], ascending=[False, True]),
+    use_container_width=True,
+    height=420,
+)
+st.download_button(
+    "💾 Download CSV",
+    data=df_f.to_csv(index=False).encode("utf-8"),
+    file_name="bitcoin_etf_flows.csv",
+    mime="text/csv",
+)
