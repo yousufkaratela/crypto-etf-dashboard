@@ -1,11 +1,10 @@
 import streamlit as st
-import pandas as pd
 from crypto_etf_flows import fetch_etf_flows
 
 st.set_page_config(page_title="Crypto ETF Flows Dashboard", layout="wide")
 
 st.title("📊 Crypto ETF Flows Dashboard (BlackRock, Grayscale, Fidelity, …)")
-st.caption("Live flows parsed from Farside via fallback scraping.")
+st.caption("Live flows parsed from Farside using BeautifulSoup.")
 
 # Refresh button
 if st.button("🔄 Force refresh (clear cache)"):
