@@ -1,6 +1,6 @@
 streamlit
-requests
 pandas
-matplotlib
+requests
+beautifulsoup4
 lxml
 altair
