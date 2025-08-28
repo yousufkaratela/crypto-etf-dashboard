@@ -4,16 +4,31 @@ import matplotlib.pyplot as plt
 import streamlit as st
 
 # --------------------
-# 1. Data Fetching
+# 1. Data Fetching (Scraping Farside ETF flows)
 # --------------------
 @st.cache_data
 def get_farside_data():
-    url = "https://farside.co.uk/api/bitcoin-etf-flows"  # Example endpoint, adjust if needed
+    url = "https://farside.co.uk/bitcoin-etf-flows"
     try:
-        data = requests.get(url, timeout=10).json()
-        df = pd.DataFrame(data)
-        df["date"] = pd.to_datetime(df["date"])
-        return df
+        # Read HTML tables directly
+        tables = pd.read_html(url)
+        df = tables[0]  # First table is the ETF flows table
+
+        # Standardize column names
+        df.columns = [c.strip().lower() for c in df.columns]
+
+        # Rename if needed
+        if "fund" in df.columns:
+            df = df.rename(columns={"fund": "etf"})
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
+        # Convert numeric columns
+        if "flow ($m)" in df.columns:
+            df["flow"] = pd.to_numeric(df["flow ($m)"], errors="coerce") * 1_000_000
+            df = df.drop(columns=["flow ($m)"])
+
+        return df.dropna(subset=["date"])
     except Exception as e:
         st.error(f"Error fetching data: {e}")
         return pd.DataFrame()
@@ -27,11 +42,14 @@ st.title("📊 Crypto ETF Flows Dashboard (BlackRock, Grayscale, Fidelity)")
 # Load data
 df = get_farside_data()
 if df.empty:
+    st.warning("No data available.")
     st.stop()
 
 # ETF Selector
 etfs = sorted(df["etf"].unique())
-selected_etfs = st.multiselect("Select ETFs to Display", etfs, default=["IBIT", "GBTC", "FBTC"])
+selected_etfs = st.multiselect(
+    "Select ETFs to Display", etfs, default=etfs[:3]
+)
 
 # Filter data
 df_filtered = df[df["etf"].isin(selected_etfs)]
@@ -41,7 +59,7 @@ df_filtered = df[df["etf"].isin(selected_etfs)]
 # --------------------
 
 st.subheader("Daily Net Flows")
-fig, ax = plt.subplots(figsize=(10,5))
+fig, ax = plt.subplots(figsize=(10, 5))
 for etf in selected_etfs:
     etf_data = df_filtered[df_filtered["etf"] == etf]
     ax.plot(etf_data["date"], etf_data["flow"], label=etf)
@@ -54,8 +72,14 @@ st.pyplot(fig)
 
 # Cumulative flows
 st.subheader("Cumulative Net Flows")
-cum_df = df_filtered.groupby(["date", "etf"])["flow"].sum().groupby(level=1).cumsum().reset_index()
-fig2, ax2 = plt.subplots(figsize=(10,5))
+cum_df = (
+    df_filtered.groupby(["date", "etf"])["flow"]
+    .sum()
+    .groupby(level=1)
+    .cumsum()
+    .reset_index()
+)
+fig2, ax2 = plt.subplots(figsize=(10, 5))
 for etf in selected_etfs:
     etf_data = cum_df[cum_df["etf"] == etf]
     ax2.plot(etf_data["date"], etf_data["flow"], label=etf)
@@ -74,7 +98,7 @@ st.dataframe(df_filtered.sort_values("date", ascending=False))
 
 st.download_button(
     label="💾 Download Data as CSV",
-    data=df_filtered.to_csv(index=False).encode('utf-8'),
+    data=df_filtered.to_csv(index=False).encode("utf-8"),
     file_name="etf_flows.csv",
     mime="text/csv",
 )
