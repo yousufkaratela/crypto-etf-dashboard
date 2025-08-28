@@ -131,7 +131,7 @@ col_a, col_b = st.columns([1, 2])
 with col_a:
     if st.button("🔁 Force refresh (clear cache)", use_container_width=True):
         fetch_farside_flows.clear()  # type: ignore[attr-defined]
-        st.experimental_rerun()
+        st.rerun()
 
 # -------------------------------
 # Load data
