@@ -1,50 +1,51 @@
-import requests
+import streamlit as st
 import pandas as pd
-from bs4 import BeautifulSoup
+import numpy as np
+import altair as alt
 
-# -----------------------------
-# Fetch ETF Flows Data
-# -----------------------------
-def get_etf_flows():
-    url = "https://farside.co.uk/bitcoin-etf-flows"
+# -------------------------------
+# Basic Streamlit App Setup
+# -------------------------------
+st.set_page_config(page_title="Crypto ETF Dashboard", layout="wide")
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/115.0 Safari/537.36"
-    }
+st.title("🚀 Crypto ETF Dashboard")
+st.write("✅ This is a minimal working version of the app. If you can see this, the deployment works fine.")
 
-    response = requests.get(url, headers=headers)
-    response.raise_for_status()
+# -------------------------------
+# Create Dummy Data
+# -------------------------------
+np.random.seed(42)
+dates = pd.date_range("2025-01-01", periods=30)
+data = pd.DataFrame({
+    "Date": dates,
+    "BTC_ETF_Flows": np.random.randint(-50, 100, size=30),
+    "ETH_ETF_Flows": np.random.randint(-30, 80, size=30)
+})
 
-    soup = BeautifulSoup(response.text, "html.parser")
+# -------------------------------
+# Show Data Table
+# -------------------------------
+st.subheader("📊 Sample ETF Flows Data")
+st.dataframe(data)
 
-    # Locate the table
-    table = soup.find("table")
-    if table is None:
-        raise ValueError("No table found on page")
+# -------------------------------
+# Line Chart
+# -------------------------------
+st.subheader("📈 ETF Flows Over Time")
+chart = alt.Chart(data).transform_fold(
+    ["BTC_ETF_Flows", "ETH_ETF_Flows"],
+    as_=["ETF", "Flows"]
+).mark_line().encode(
+    x="Date:T",
+    y="Flows:Q",
+    color="ETF:N"
+).properties(width=700, height=400)
 
-    # Extract headers
-    headers = [th.get_text(strip=True) for th in table.find("tr").find_all("th")]
+st.altair_chart(chart, use_container_width=True)
 
-    # Extract rows
-    rows = []
-    for tr in table.find_all("tr")[1:]:
-        cells = [td.get_text(strip=True) for td in tr.find_all("td")]
-        if cells:
-            rows.append(cells)
-
-    # Convert to DataFrame
-    df = pd.DataFrame(rows, columns=headers)
-    return df
-
-
-# -----------------------------
-# Main function for Streamlit
-# -----------------------------
-if __name__ == "__main__":
-    try:
-        df = get_etf_flows()
-        print(df.head())
-    except Exception as e:
-        print("Error fetching ETF flows:", e)
+# -------------------------------
+# Summary Stats
+# -------------------------------
+st.subheader("📌 Summary")
+st.metric("Total BTC ETF Flows", f"{data['BTC_ETF_Flows'].sum()} M")
+st.metric("Total ETH ETF Flows", f"{data['ETH_ETF_Flows'].sum()} M")
