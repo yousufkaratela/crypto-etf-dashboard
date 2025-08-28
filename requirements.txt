@@ -1,6 +1,6 @@
 streamlit
 pandas
 requests
+altair
 beautifulsoup4
 lxml
-altair
